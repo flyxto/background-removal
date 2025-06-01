@@ -1,7 +1,5 @@
-// Utility function to validate dealer NIC numbers
-
-// URL to the dealers JSON file
-const DEALERS_JSON_URL = "/data/SAMPLEdealers.json"
+// Utility function to validate dealer NIC numbers using API endpoint
+// Client-side validation functions that call the API
 
 // Interface for dealer data
 export interface Dealer {
@@ -18,65 +16,162 @@ export interface Dealer {
   HOTEL: string
 }
 
-// Interface for the dealers JSON response
-interface DealersResponse {
-  dealers: Dealer[]
+// Interface for API response
+interface ValidationResponse {
+  valid: boolean
+  dealer?: Dealer
+  message?: string
+  error?: string
 }
 
-// Cache the dealers data to avoid fetching it multiple times
-let dealersCache: Dealer[] | null = null
-let lastFetchTime = 0
+interface BulkValidationResponse {
+  results: Array<{
+    nic: string
+    valid: boolean
+    dealer?: Dealer
+  }>
+  total: number
+  found: number
+}
+
+// Cache the dealers data to avoid fetching it multiple times (optional)
+let dealersCache: Map<string, Dealer> = new Map()
+let lastCacheUpdate = 0
 const CACHE_DURATION = 1000 * 60 * 5 // 5 minutes
 
 /**
- * Fetch dealers data from the JSON file
+ * Validate if a NIC number exists in the dealers list using API endpoint
  */
-export async function fetchDealers(): Promise<Dealer[]> {
-  const currentTime = Date.now()
-
-  // Return cached data if it's still valid
-  if (dealersCache && currentTime - lastFetchTime < CACHE_DURATION) {
-    return dealersCache
-  }
-
+export async function validateDealerNIC(nic: string): Promise<{ valid: boolean; dealer?: Dealer }> {
   try {
-    const response = await fetch(DEALERS_JSON_URL)
-
-    if (!response.ok) {
-      throw new Error(`Failed to fetch dealers data: ${response.status} ${response.statusText}`)
+    if (!nic || !nic.trim()) {
+      throw new Error("NIC number is required")
     }
 
-    const data: DealersResponse = await response.json()
-    dealersCache = data.dealers
-    lastFetchTime = currentTime
+    const normalizedNIC = nic.trim().toUpperCase()
 
-    return dealersCache
+    // Check cache first (optional optimization)
+    const currentTime = Date.now()
+    if (dealersCache.has(normalizedNIC) && (currentTime - lastCacheUpdate < CACHE_DURATION)) {
+      const dealer = dealersCache.get(normalizedNIC)
+      return { valid: true, dealer }
+    }
+
+    // Make API call
+    const response = await fetch(`/api/validate-dealer?nic=${encodeURIComponent(nic.trim())}`, {
+      method: 'GET',
+      headers: {
+        'Content-Type': 'application/json',
+      },
+    })
+
+    if (!response.ok) {
+      if (response.status === 400) {
+        const errorData = await response.json()
+        throw new Error(errorData.error || 'Invalid request')
+      }
+      if (response.status === 500) {
+        throw new Error('Server error occurred while validating NIC')
+      }
+      throw new Error(`HTTP error! status: ${response.status}`)
+    }
+
+    const data: ValidationResponse = await response.json()
+
+    // Update cache if dealer found
+    if (data.valid && data.dealer) {
+      dealersCache.set(normalizedNIC, data.dealer)
+      lastCacheUpdate = currentTime
+    }
+
+    return {
+      valid: data.valid,
+      dealer: data.dealer
+    }
+
   } catch (error) {
-    console.error("Error fetching dealers data:", error)
-    throw new Error("Failed to fetch dealers data. Please try again later.")
+    console.error("Error validating dealer NIC:", error)
+    
+    // Re-throw with more specific error messages
+    if (error instanceof Error) {
+      throw error
+    } else {
+      throw new Error("Failed to validate NIC. Please try again later.")
+    }
   }
 }
 
 /**
- * Validate if a NIC number exists in the dealers list
+ * Validate multiple NIC numbers at once using bulk API endpoint
  */
-export async function validateDealerNIC(nic: string): Promise<{ valid: boolean; dealer?: Dealer }> {
+export async function validateMultipleDealerNICs(nics: string[]): Promise<BulkValidationResponse> {
   try {
-    const dealers = await fetchDealers()
-
-    // Normalize the NIC by removing any spaces and converting to uppercase
-    const normalizedNIC = nic.trim().toUpperCase()
-
-    // Find the dealer with the matching NIC
-    const dealer = dealers.find((d) => String(d.NICNUMBER).trim().toUpperCase() === normalizedNIC)
-
-    if (dealer) {
-      return { valid: true, dealer }
-    } else {
-      return { valid: false }
+    if (!nics || nics.length === 0) {
+      throw new Error("NICs array is required")
     }
+
+    if (nics.length > 100) {
+      throw new Error("Maximum 100 NICs allowed per request")
+    }
+
+    const response = await fetch('/api/validate-dealer', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({ nics })
+    })
+
+    if (!response.ok) {
+      if (response.status === 400) {
+        const errorData = await response.json()
+        throw new Error(errorData.error || 'Invalid request')
+      }
+      if (response.status === 500) {
+        throw new Error('Server error occurred while validating NICs')
+      }
+      throw new Error(`HTTP error! status: ${response.status}`)
+    }
+
+    const data: BulkValidationResponse = await response.json()
+
+    // Update cache with found dealers
+    const currentTime = Date.now()
+    data.results.forEach(result => {
+      if (result.valid && result.dealer) {
+        const normalizedNIC = result.nic.trim().toUpperCase()
+        dealersCache.set(normalizedNIC, result.dealer)
+      }
+    })
+    lastCacheUpdate = currentTime
+
+    return data
+
   } catch (error) {
-    console.error("Error validating dealer NIC:", error)
-    throw error
+    console.error("Error validating multiple dealer NICs:", error)
+    
+    if (error instanceof Error) {
+      throw error
+    } else {
+      throw new Error("Failed to validate NICs. Please try again later.")
+    }
+  }
+}
+
+/**
+ * Clear the local cache (useful for testing or manual cache invalidation)
+ */
+export function clearDealerCache(): void {
+  dealersCache.clear()
+  lastCacheUpdate = 0
+}
+
+/**
+ * Get cache statistics (useful for debugging)
+ */
+export function getCacheStats(): { size: number; lastUpdate: Date | null } {
+  return {
+    size: dealersCache.size,
+    lastUpdate: lastCacheUpdate > 0 ? new Date(lastCacheUpdate) : null
   }
 }
